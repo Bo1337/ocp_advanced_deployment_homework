@@ -14,6 +14,8 @@
 - name: Verify NFS Shared Volumes on Hosts
   hosts: nfs
   tasks:
+    - name: List NFS Shared Volumes
+      shell: exportfs
 
 - name: Install packages and config auth
   hosts: localhost
@@ -21,68 +23,195 @@
     - name: required packages are present
       yum:
         name:
-          - ????
-          - ????
+          - openshift-ansible
+          - atomic-openshift-clients
         state: present
 
 - name: Generate Inventory Hosts File
   hosts: localhost
   tasks:
     - name: Generate Inventory script
-      script: /root/ocp_advanced_deployment_homework/scripts/generate_inventory.sh
+      script: ./scripts/generate_inventory.sh
 
 - name: Execute the openshift-ansible prerequisites
-  import_playbook: ???
+  import_playbook: /usr/share/ansible/openshift-ansible/playbooks/prerequisites.yml
 
 - name: Execute the openshift-ansible Deployer
-  import_playbook: ???
+  import_playbook: /usr/share/ansible/openshift-ansible/playbooks/deploy_cluster.yml
 
 - name: Verify OpenShift Cluster
   hosts: masters[0]
   tasks:
     - name: copy the .kube directory from master1 to your bastion
-    ????
-
+      fetch:
+        src: /root/.kube/config
+        dest: /root/.kube/config
+        flat: yes
+        
 - name: Post installation configuration
   hosts: localhost
   tasks:
-    - name: make sure you are system:dmin
+    - name: Verify logged in User is system:admin
       shell: oc whoami | grep system:admin
 
-- name: Create PVs for Users
+- name: Create PVs
   hosts: nfs
   tasks:
-    - name:
-      script: ????
+    - name: Create PV directories
+      script: ./scripts/create_pvs.sh
+
+- name: Restart nfs-server
+  hosts: nfs
+  tasks:
     - name: Restarting NFS Server...
       shell: systemctl restart nfs-server
 
 - name: Create 25 definitions files for PVs 5G size
   hosts: localhost
+  tasks:
+    - name: Create ReadWriteOnce PV definitions
+      script: ./scripts/pvs_5Gsize.sh
 
 - name: Create 25 definitions files for PVs 10G size
+  hosts: localhost
+  tasks:
+    - name: Create ReadWriteMany PV definitions
+      script: ./scripts/pvs_10Gsize.sh
 
 - name: Create all PVs from definitions files
+  hosts: localhost
+  tasks:
+    - name: Create all defined PVs
+      shell: cat /root/pvs/* | oc create -f -
 
-- name: Fix NFS Persistent Volume Recycling
+- name: Set NFS Persistent Volume Recycling
+  hosts: nodes
+  tasks:
+    - name: Pull Latest OSE-Recycler Image
+      shell: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
+    - name: Tag OSE-Recycler Image
+      shell: docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v3.11.16
+
+- name: OC admin user
+  hosts: masters
+  tasks:
+    - name: Creating OC user admin
+      shell: htpasswd -b /etc/origin/master/htpasswd admin r3dh4t1! 
+
+- name: Add permissions for admin
+  hosts: localhost
+  tasks:
+    - name: Add admin to cluster-admin role 
+      shell: oc adm policy add-cluster-role-to-user cluster-admin admin
 
 - name: Smoke Test
-
-- name: Jenkins Setup
   hosts: localhost
   tasks:
-    - name: jenkins setup
-      script: ???
+    - name: Init a Smoke Test Application
+      script: ./scripts/nodejs_mongo_app.sh
 
-- name: HPA configuration on production deployment of openshift-tasks
+- name: Pipeline Setup
   hosts: localhost
   tasks:
+    - name: pipeline setup
+      script: ./scripts/cicd.sh 
 
-- name: Creation of users for Alpha and Beta clients
+- name: Init users
+  hosts: masters
+  tasks:
+    - name: Add users in Master htpasswd file 
+      command: "htpasswd -b /etc/origin/master/htpasswd {{ item }}"
+      with_items:
+        - Amy r3dh4t1! 
+        - Andrew r3dh4t1! 
+        - Brian r3dh4t1! 
+        - Betty r3dh4t1! 
+        - Chris r3dh4t1! 
+        - Cody r3dh4t1! 
 
-- name: Assigning labels to the users according to its group
+- name: Setting default project 
+  hosts: localhost
+  tasks:
+    - name: Label default project
+      shell: oc label namespace default name=default
 
-- name: Setup the environment for Alpha and Beta clients
+- name: Setting project-request
+  hosts: localhost
+  tasks:
+    - name: Setup project request
+      shell: oc project default; oc apply -f ./yaml/project-request.yaml
 
+- name: Set defaults for new projects
+  hosts: masters
+  tasks:
+    - name: Set project request template as default
+      replace:
+        path: /etc/origin/master/master-config.yaml
+        regexp: "projectRequestTemplate: ''"
+        replace: "projectRequestTemplate: \"default/project-request\""
+        backup: yes
 
-  ....
+- name: Restart master api and controllera
+  hosts: masters
+  tasks:
+    - name: Restart masters api and controllers
+      command: "/usr/local/bin/master-restart {{ item }}"
+      with_items:
+        - api
+        - controllers
+      retries: 10
+      delay: 10
+      register: result
+      until: result.rc == 0
+
+- name: Setting project configs
+  hosts: localhost
+  tasks:
+    - name: Creating client projects
+      command: "oc adm new-project {{ item }}"
+      with_items:
+        - alpha  --display-name="Alpha" --node-selector='client=alpha'
+        - beta  --display-name="Beta" --node-selector='client=beta'
+        - common --display-name="Common"
+      retries: 3 
+      delay: 5
+      register: result
+      until: result.rc == 0
+    - name: Creating users in openshift 
+      command: "oc create user {{ item }}"
+      with_items:
+        - Amy
+        - Andrew
+        - Brian
+        - Betty
+        - Chris
+        - Cody
+    - name: Creating groups with users 
+      command: "oc adm groups new {{ item }}"
+      with_items:
+        - alpha Amy Andrew
+        - beta Betty Brian
+        - common Chris Cody
+    - name: Creating labels
+      command: "oc label {{ item }}"
+      with_items:
+        - group/alpha client=alpha
+        - group/beta client=beta
+        - group/common client=common
+    - name: Creating user labels
+      command: "oc label user {{ item }}"
+      with_items:
+        - Amy client=alpha
+        - Andrew client=alpha
+        - Betty client=beta
+        - Brian client=beta
+        - Chris client=common
+        - Cody client=common
+    - name: Adding admin role to group for project
+      command: "oadm policy add-role-to-group admin {{ item }}"
+      with_items:
+        - alpha -n alpha
+        - beta -n beta
+        - common -n common
+    - name: Remove self-provisioner role
+      shell: oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated:oauth
